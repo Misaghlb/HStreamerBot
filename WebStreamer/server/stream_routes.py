@@ -163,69 +163,64 @@ def parse_range_header(header, file_size):
 url_cache = {}
 
 # URL Download
-async def direct_download_streamer(request: web.Request, url: str):
-    """Stream a file from a direct URL."""
+# Route for downloading files from direct URLs
+@routes.get("/url/{url}", allow_head=True)
+async def url_download_handler(request: web.Request):
+    """Handler for downloading files from direct URLs."""
+    try:
+        url = request.match_info["url"]
+        return await url_media_streamer(request, url)
+    except Exception as e:
+        logging.critical(e)
+        logging.debug(traceback.format_exc())
+        raise web.HTTPInternalServerError(text=str(e))
 
-    # Basic URL validation (replace with more robust validation if needed)
-    if not url.startswith(("http://", "https://")):
-        raise HTTPForbidden(text="Invalid URL")
+async def url_media_streamer(request: web.Request, url: str):
+    """Stream media file from a direct URL."""
+    range_header = request.headers.get("Range")
 
     async with aiohttp.ClientSession() as session:
-        async with session.head(url) as head_response:
-            if head_response.status != 200:
-                raise HTTPNotFound(text=f"Could not access URL: {url}")
-
-            file_size = int(head_response.headers.get("Content-Length", 0))
-            mime_type = head_response.headers.get("Content-Type")
-            supports_range = "bytes" in head_response.headers.get("Accept-Ranges", "")
-
-        range_header = request.headers.get("Range")
-        from_bytes, until_bytes = parse_range_header(range_header, file_size)
-
-        if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-            return web.Response(
-                status=416,
-                body="416: Range not satisfiable",
-                headers={"Content-Range": f"bytes */{file_size}"},
-            )
-
-        headers = {}
-        if range_header and supports_range:
-            headers["Range"] = range_header
-
-        async with session.get(url, headers=headers) as response:
-            if response.status != 200 and response.status != 206:
-                raise HTTPNotFound(text=f"Could not download file: {url}")
-
+        async with session.get(url) as response:
+            if response.status != 200:
+                raise web.HTTPNotFound(text="File not found")
+            
+            file_size = int(response.headers.get('Content-Length', 0))
+            from_bytes, until_bytes = parse_range_header(range_header, file_size)
+            
+            if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+                return web.Response(
+                    status=416,
+                    body="416: Range not satisfiable",
+                    headers={"Content-Range": f"bytes */{file_size}"},
+                )
+            
             chunk_size = 1024 * 1024
+            offset = from_bytes - (from_bytes % chunk_size)
+            first_part_cut = from_bytes - offset
+            last_part_cut = until_bytes % chunk_size + 1
             req_length = until_bytes - from_bytes + 1
+            part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
+            
+            async def file_generator():
+                async with session.get(url, headers={'Range': f"bytes={from_bytes}-{until_bytes}"}) as range_response:
+                    while True:
+                        chunk = await range_response.content.read(chunk_size)
+                        if not chunk:
+                            break
+                        yield chunk
+            
+            mime_type = response.headers.get('Content-Type') or 'application/octet-stream'
             disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
-            filename = url.split("/")[-1]  # Extract filename from URL (improve if needed)
-
+            
             return web.Response(
                 status=206 if range_header else 200,
-                body=response.content.iter_chunked(chunk_size),  # Stream the response content
+                body=file_generator(),
                 headers={
                     "Content-Type": mime_type,
                     "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
                     "Content-Length": str(req_length),
-                    "Content-Disposition": f'{disposition}; filename="{filename}"',
-                    "Accept-Ranges": "bytes" if supports_range else "none",
+                    "Content-Disposition": f'{disposition}; filename="{url.split("/")[-1]}"',
+                    "Accept-Ranges": "bytes",
                 },
             )
-
-@routes.get("/dl_direct/{url}", allow_head=True)
-async def direct_download_handler(request: web.Request):
-    """Handler for direct link download endpoint."""
-    try:
-        url = request.match_info["url"]
-        return await direct_download_streamer(request, url)
-    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-        logging.error(f"Error downloading from {url}: {e}")
-        raise HTTPNotFound(text=f"Error downloading from {url}")
-    except Exception as e:
-        logging.critical(e)
-        logging.debug(traceback.format_exc())
-        raise HTTPInternalServerError(text=str(e))
-
 
