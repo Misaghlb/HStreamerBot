@@ -163,8 +163,17 @@ def parse_range_header(header, file_size):
 
 # URL
 
+# Increase chunk size for faster downloads
+CHUNK_SIZE = 1024 * 1024  # 1MB
+
+# Create a connection pool
+conn_pool = aiohttp.TCPConnector(limit=100)  # Adjust the limit as needed
+
+# Create a cache for file metadata
+metadata_cache = TTLCache(maxsize=1000, ttl=3600)  # Cache for 1 hour
+
 @routes.get("/dllink", allow_head=True)
-async def download_handler(request: web.Request):
+async def download_handler2(request: web.Request):
     """Handler for download endpoint."""
     try:
         url = request.query.get("url")
@@ -179,16 +188,29 @@ async def download_handler(request: web.Request):
         logging.debug(traceback.format_exc())
         raise web.HTTPInternalServerError(text=str(e))
 
+async def get_file_metadata(session, url):
+    """Get file metadata and cache it."""
+    if url in metadata_cache:
+        return metadata_cache[url]
+
+    async with session.head(url) as response:
+        if response.status != 200:
+            raise web.HTTPBadGateway(text=f"Failed to fetch URL: HTTP {response.status}")
+        file_size = int(response.headers.get("Content-Length", 0))
+        mime_type = response.headers.get("Content-Type") or mimetypes.guess_type(url)[0] or "application/octet-stream"
+    
+    metadata = {"file_size": file_size, "mime_type": mime_type}
+    metadata_cache[url] = metadata
+    return metadata
+
 async def media_streamer2(request: web.Request, url: str):
     """Stream media file from URL."""
     range_header = request.headers.get("Range")
     
-    async with aiohttp.ClientSession() as session:
-        async with session.head(url) as response:
-            if response.status != 200:
-                raise web.HTTPBadGateway(text=f"Failed to fetch URL: HTTP {response.status}")
-            file_size = int(response.headers.get("Content-Length", 0))
-            mime_type = response.headers.get("Content-Type") or mimetypes.guess_type(url)[0] or "application/octet-stream"
+    async with aiohttp.ClientSession(connector=conn_pool) as session:
+        metadata = await get_file_metadata(session, url)
+        file_size = metadata["file_size"]
+        mime_type = metadata["mime_type"]
 
     from_bytes, until_bytes = parse_range_header(range_header, file_size)
     if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
@@ -201,14 +223,17 @@ async def media_streamer2(request: web.Request, url: str):
     req_length = until_bytes - from_bytes + 1
 
     async def body():
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(connector=conn_pool) as session:
             headers = {"Range": f"bytes={from_bytes}-{until_bytes}"}
             async with session.get(url, headers=headers) as response:
-                async for chunk in response.content.iter_any():
+                while True:
+                    chunk = await response.content.read(CHUNK_SIZE)
+                    if not chunk:
+                        break
                     yield chunk
 
     disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
-    filename = url.split("/")[-1]
+    filename = os.path.basename(url)
 
     return web.Response(
         status=206 if range_header else 200,
@@ -221,6 +246,8 @@ async def media_streamer2(request: web.Request, url: str):
             "Accept-Ranges": "bytes",
         },
     )
+
+
 
 def parse_range_header(header, file_size):
     """Parse Range header and return tuple of (from_bytes, until_bytes)."""
