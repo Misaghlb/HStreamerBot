@@ -211,22 +211,26 @@ async def url_streamer(request: web.Request, url: str):
     last_part_cut = until_bytes % chunk_size + 1
     req_length = until_bytes - from_bytes + 1
     part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
-    
-    body = await yield_file_from_url(url, offset, first_part_cut, last_part_cut, part_count, chunk_size)
 
-    disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
-
-    return web.Response(
+    response = web.StreamResponse(
         status=206 if range_header else 200,
-        body=body,
         headers={
             "Content-Type": mime_type,
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{file_info["filename"]}"',
+            "Content-Disposition": f'attachment; filename="{file_info["filename"]}"',
             "Accept-Ranges": "bytes",
         },
     )
+
+    await response.prepare(request)
+
+    async for chunk in yield_file_from_url(url, offset, first_part_cut, last_part_cut, part_count, chunk_size):
+        await response.write(chunk)
+    
+    await response.write_eof()
+
+    return response
 
 async def get_file_properties_from_url(url):
     """Get file properties like size and mime type from the URL."""
@@ -257,4 +261,3 @@ async def yield_file_from_url(url, offset, first_part_cut, last_part_cut, part_c
                     yield chunk[:last_part_cut]
                 else:
                     yield await resp.content.read(chunk_size)
-
