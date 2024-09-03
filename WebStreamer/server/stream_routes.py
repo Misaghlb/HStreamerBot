@@ -164,40 +164,68 @@ url_cache = {}
 
 # URL Download
 
-@routes.get("/direct/{url}", allow_head=True)
-async def download_handler(request: web.Request):
-    """Handler for proxying file downloads from direct URLs."""
-    url = request.match_info["url"]
-    range_header = request.headers.get('Range')
+# Set chunk size for downloading (adjust as needed)
+CHUNK_SIZE = 1024 * 1024  # 1 MB
 
-    # Extract the range from the request if present
-    if range_header:
-        range_start = int(range_header.replace("bytes=", "").split("-")[0])
-    else:
-        range_start = 0
+@routes.get("/url/{path}", allow_head=True)
+async def url_download_handler(request: web.Request):
+    """Handler for downloading files from direct URLs with resumability."""
+    url = request.match_info.get("path")
+    if not url:
+        return web.Response(status=400, text="Missing 'url' parameter")
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers={'Range': f'bytes={range_start}-'}) as response:
-                if response.status == 200 or response.status == 206:  # 200 OK or 206 Partial Content
-                    # Get content length and mime type from response headers
-                    content_length = response.headers.get('Content-Length')
-                    content_type = response.headers.get('Content-Type')
+    range_header = request.headers.get("Range")
+    file_name = os.path.basename(url) or "unknown_file"
 
-                    # Prepare the response to stream the file to the client
-                    headers = {
-                        'Content-Type': content_type,
-                        'Content-Length': content_length,
-                    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            # Make initial HEAD request to get file size and support for Range
+            async with session.head(url) as response:
+                if response.status != 200:
+                    return web.Response(status=response.status, text=await response.text())
+                total_size = int(response.headers.get("Content-Length", -1))
+                accept_ranges = response.headers.get("Accept-Ranges")
 
-                    if range_header:
-                        headers['Content-Range'] = f'bytes {range_start}-{int(range_start) + int(content_length) - 1}/{content_length}'
+            if range_header and accept_ranges == "bytes":
+                # Handle range request
+                start, end = range_header.replace("bytes=", "").split("-")
+                start = int(start)
+                end = int(end) if end else total_size - 1
+                headers = {"Range": f"bytes={start}-{end}"}
+                status_code = 206
+            else:
+                # Full download
+                start = 0
+                end = total_size - 1
+                headers = {}
+                status_code = 200
 
-                    return web.Response(body=response.content, headers=headers, status=response.status)
-                else:
-                    logging.error(f"Failed to fetch file: HTTP Status {response.status}")
-                    return web.Response(status=response.status)
-    except Exception as e:
-        logging.error(f"An error occurred: {e}")
-        return web.Response(status=500, text='Internal Server Error')
+            async with session.get(url, headers=headers) as response:
+                if response.status not in [200, 206]:
+                    return web.Response(status=response.status, text=await response.text())
 
+                content_type = response.headers.get("Content-Type", "application/octet-stream")
+
+                # Stream the response in chunks
+                response = web.StreamResponse(
+                    status=status_code,
+                    reason=response.reason,
+                    headers={
+                        "Content-Type": content_type,
+                        "Content-Disposition": f'attachment; filename="{file_name}"',
+                        "Content-Length": str(end - start + 1),
+                        "Accept-Ranges": "bytes",
+                        "Content-Range": f"bytes {start}-{end}/{total_size}" if status_code == 206 else None,
+                    },
+                )
+                await response.prepare(request)
+
+                async for chunk in response.content.iter_chunked(CHUNK_SIZE):
+                    await response.write(chunk)
+
+                return response
+
+        except (ClientPayloadError, BadStatusLine, asyncio.TimeoutError, aiohttp.ClientError) as e:
+            logging.error(f"Error downloading URL: {url} - {e}")
+            traceback.print_exc()
+            return web.Response(status=500, text="Error downloading URL")
