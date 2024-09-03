@@ -161,11 +161,14 @@ def parse_range_header(header, file_size):
 
 # URL
 
-@routes.get("/downl/{path}", allow_head=True)
-async def download_handler2(request: web.Request):
+@routes.get("/dllink", allow_head=True)
+async def download_handler(request: web.Request):
     """Handler for download endpoint."""
     try:
-        url = request.match_info["path"]
+        url = request.query.get("url")
+        if not url:
+            raise web.HTTPBadRequest(text="Missing 'url' query parameter")
+        url = unquote(url)  # Decode the URL
         return await media_streamer2(request, url)
     except aiohttp.ClientError as e:
         raise web.HTTPBadGateway(text=str(e))
