@@ -222,7 +222,7 @@ async def direct_url_streamer(request: web.Request, db_id: str):
             "Content-Type": mime_type,
             "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
             "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{utils.get_name(file_id) if not is_direct_download_url(db_id) else db_id.split("/")[-1]}"',  # Use appropriate filename
+            "Content-Disposition": f'{disposition}; filename="{db_id.split("/")[-1]}"',  # Use appropriate filename
             "Accept-Ranges": "bytes",
         },
     )
@@ -233,7 +233,7 @@ async def url_download_handler(request: web.Request):
     """Handler for downloading files from direct URLs."""
     try:
         url = request.match_info["url"]
-        return await url_media_streamer(request, url)
+        return await direct_url_streamer(request, url)
     except Exception as e:
         logging.critical(e)
         logging.debug(traceback.format_exc())
