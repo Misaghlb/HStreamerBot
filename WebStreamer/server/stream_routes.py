@@ -18,7 +18,6 @@ import aiohttp
 from urllib.parse import unquote
 import asyncio
 import os
-from cachetools import TTLCache
 
 routes = web.RouteTableDef()
 
@@ -165,12 +164,12 @@ def parse_range_header(header, file_size):
 
 
 # URL
-
 # Increase chunk size for faster downloads
 CHUNK_SIZE = 1024 * 1024  # 1MB
 
-# Create a cache for file metadata
-metadata_cache = TTLCache(maxsize=1000, ttl=3600)  # Cache for 1 hour
+# Create a simple cache for file metadata
+metadata_cache = {}
+CACHE_TTL = 3600  # Cache for 1 hour
 
 # Create a function to get or create the connection pool
 async def get_connector():
@@ -186,7 +185,7 @@ async def download_handler2(request: web.Request):
         if not url:
             raise web.HTTPBadRequest(text="Missing 'url' query parameter")
         url = unquote(url)  # Decode the URL
-        return await media_streamer(request, url)
+        return await media_streamer2(request, url)
     except aiohttp.ClientError as e:
         raise web.HTTPBadGateway(text=str(e))
     except Exception as e:
@@ -196,8 +195,11 @@ async def download_handler2(request: web.Request):
 
 async def get_file_metadata(session, url):
     """Get file metadata and cache it."""
+    current_time = time.time()
     if url in metadata_cache:
-        return metadata_cache[url]
+        cached_data, timestamp = metadata_cache[url]
+        if current_time - timestamp < CACHE_TTL:
+            return cached_data
 
     async with session.head(url) as response:
         if response.status != 200:
@@ -206,7 +208,7 @@ async def get_file_metadata(session, url):
         mime_type = response.headers.get("Content-Type") or mimetypes.guess_type(url)[0] or "application/octet-stream"
     
     metadata = {"file_size": file_size, "mime_type": mime_type}
-    metadata_cache[url] = metadata
+    metadata_cache[url] = (metadata, current_time)
     return metadata
 
 async def media_streamer2(request: web.Request, url: str):
@@ -254,7 +256,6 @@ async def media_streamer2(request: web.Request, url: str):
             "Accept-Ranges": "bytes",
         },
     )
-
 
 def parse_range_header(header, file_size):
     """Parse Range header and return tuple of (from_bytes, until_bytes)."""
