@@ -157,3 +157,71 @@ def parse_range_header(header, file_size):
         if range_parts[1]:
             until_bytes = int(range_parts[1]) if range_parts[1] else file_size - 1
     return from_bytes, until_bytes
+
+
+# URL
+
+class InvalidHash(Exception):
+    pass
+
+class FileNotFound(Exception):
+    pass
+
+@routes.get("/dl2/{url:path}", allow_head=True)
+async def download_handler2(request: web.Request):
+    """Handler for download endpoint."""
+    try:
+        url = request.match_info["url"]
+        return await media_streamer2(request, url)
+    except InvalidHash as e:
+        raise web.HTTPForbidden(text=e.message)
+    except FileNotFound as e:
+        raise web.HTTPNotFound(text=e.message)
+    except (AttributeError, aiohttp.ClientError):
+        pass
+    except Exception as e:
+        logging.critical(e)
+        logging.debug(traceback.format_exc())
+        raise web.HTTPInternalServerError(text=str(e))
+
+async def media_streamer2(request: web.Request, url: str):
+    """Stream media from URL."""
+
+    range_header = request.headers.get("Range")
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status != 200:
+                raise FileNotFound(f"Unable to download file: {url}")
+
+            file_size = int(resp.headers.get("Content-Length", 0))
+            from_bytes, until_bytes = parse_range_header(range_header, file_size)
+
+            if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+                return web.Response(
+                    status=416,
+                    body="416: Range not satisfiable",
+                    headers={"Content-Range": f"bytes */{file_size}"},
+                )
+
+            mime_type = resp.headers.get("Content-Type", mimetypes.guess_type(url)[0] or "application/octet-stream")
+            disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
+
+            await resp.release()
+
+            async with session.get(url, headers={"Range": f"bytes={from_bytes}-{until_bytes}"}) as part_resp:
+                body = await part_resp.read()
+
+            return web.Response(
+                status=206 if range_header else 200,
+                body=body,
+                headers={
+                    "Content-Type": mime_type,
+                    "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                    "Content-Length": str(until_bytes - from_bytes + 1),
+                    "Content-Disposition": f'{disposition}; filename="{url.split("/")[-1]}"',
+                    "Accept-Ranges": "bytes",
+                },
+            )
+
+
