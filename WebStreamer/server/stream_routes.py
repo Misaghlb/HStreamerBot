@@ -164,14 +164,6 @@ url_cache = {}
 
 # URL Download
 
-
-class DirectDownloadFile:
-    def __init__(self, url: str, file_size: int, mime_type: str):
-        self.url = url
-        self.file_size = file_size
-        self.mime_type = mime_type
-
-
 async def direct_url_streamer(request: web.Request, db_id: str):
     """Stream media file."""
     range_header = request.headers.get("Range")
