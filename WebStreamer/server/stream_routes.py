@@ -163,12 +163,19 @@ def parse_range_header(header, file_size):
 url_cache = {}
 
 # URL Download
+import aiohttp
+import asyncio
+import logging
+import mimetypes
+import math
+from aiohttp import web
+
 class URLStreamer:
     def __init__(self):
         """Initialize the URL streamer with caching capabilities."""
         self.url_cache = {}
         self.clean_timer = 30 * 60
-        asyncio.create_task(self.clean_cache())
+        asyncio.get_event_loop().create_task(self.clean_cache())
 
     async def clean_cache(self) -> None:
         """Periodically clean the cache to reduce memory usage."""
@@ -275,4 +282,5 @@ async def download_url_handler(request: web.Request):
     except Exception as e:
         logging.critical(e)
         raise web.HTTPInternalServerError(text=str(e))
+
 
