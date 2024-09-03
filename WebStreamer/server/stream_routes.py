@@ -7,7 +7,7 @@ import mimetypes
 import traceback
 import aiohttp
 from aiohttp import web
-from aiohttp.http_exceptions import BadStatusLine, ClientPayloadError
+from aiohttp.http_exceptions import BadStatusLine
 import asyncio
 import os
 import sys
@@ -225,7 +225,7 @@ async def url_download_handler(request: web.Request):
 
                 return response
 
-        except (ClientPayloadError, BadStatusLine, asyncio.TimeoutError, aiohttp.ClientError) as e:
+        except (BadStatusLine, asyncio.TimeoutError, aiohttp.ClientError) as e:
             logging.error(f"Error downloading URL: {url} - {e}")
             traceback.print_exc()
             return web.Response(status=500, text="Error downloading URL")
