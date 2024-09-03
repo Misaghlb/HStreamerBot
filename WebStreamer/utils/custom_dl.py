@@ -21,13 +21,6 @@ from WebStreamer.bot import work_loads
 from hydrogram import Client, utils
 from hydrogram.errors import AuthBytesInvalid
 
-
-class DirectDownloadFile:
-    def __init__(self, url: str, file_size: int, mime_type: str):
-        self.url = url
-        self.file_size = file_size
-        self.mime_type = mime_type
-
 class ByteStreamer:
     def __init__(self, client: Client):
         """A custom class that holds the cache of a specific client and class functions.
@@ -245,51 +238,3 @@ class ByteStreamer:
             await asyncio.sleep(self.clean_timer)
             self.cached_file_ids.clear()
             logging.debug("Cleaned the cache")
-
-    async def get_direct_download_properties(self, url: str) -> DirectDownloadFile:
-        """
-        Fetches properties (file size, MIME type) for a direct download URL.
-        """
-        async with aiohttp.ClientSession() as session:
-            async with session.head(url) as response:
-                if response.status != 200:
-                    raise ValueError(f"HTTP error {response.status} for URL: {url}")
-
-                file_size = int(response.headers.get("Content-Length", 0))
-                mime_type = response.headers.get("Content-Type") or mimetypes.guess_type(url)[0]
-
-                return DirectDownloadFile(url, file_size, mime_type)
-
-    async def yield_direct_download(
-        self,
-        file: DirectDownloadFile,
-        offset: int,
-        first_part_cut: int,
-        last_part_cut: int,
-        part_count: int,
-        chunk_size: int,
-    ) -> Union[bytes, None]:
-        """
-        Custom generator that yields the bytes of the file from a direct download URL.
-        """
-        headers = {"Range": f"bytes={offset}-"}
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(file.url, headers=headers) as response:
-                if response.status != 206 and response.status != 200:
-                    raise ValueError(f"HTTP error {response.status} for URL: {file.url}")
-
-                current_part = 1
-                async for chunk in response.content.iter_chunked(chunk_size):
-                    if not chunk:
-                        break
-                    elif part_count == 1:
-                        yield chunk[first_part_cut:last_part_cut]
-                    elif current_part == 1:
-                        yield chunk[first_part_cut:]
-                    elif current_part == part_count:
-                        yield chunk[:last_part_cut]
-                    else:
-                        yield chunk
-
-                    current_part += 1
