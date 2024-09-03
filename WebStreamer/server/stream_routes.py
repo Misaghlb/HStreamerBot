@@ -164,71 +164,40 @@ url_cache = {}
 
 # URL Download
 
-async def direct_url_streamer(request: web.Request, db_id: str):
-    """Stream media file."""
-    range_header = request.headers.get("Range")
-    client_index = min(work_loads, key=work_loads.get)
-    fastest_client = multi_clients[client_index]
+@routes.get("/dl/{url}", allow_head=True)
+async def download_handler(request: web.Request):
+    """Handler for proxying file downloads from direct URLs."""
+    url = request.match_info["url"]
+    range_header = request.headers.get('Range')
 
-    if Var.MULTI_CLIENT:
-        logging.info(f"Client {client_index} is now serving {request.headers.get('X-FORWARDED-FOR', request.remote)}")
-
-    if fastest_client in class_cache:
-        tg_connect = class_cache[fastest_client]
-        logging.debug(f"Using cached ByteStreamer object for client {client_index}")
+    # Extract the range from the request if present
+    if range_header:
+        range_start = int(range_header.replace("bytes=", "").split("-")[0])
     else:
-        logging.debug(f"Creating new ByteStreamer object for client {client_index}")
-        tg_connect = utils.ByteStreamer(fastest_client)
-        class_cache[fastest_client] = tg_connect
+        range_start = 0
 
     try:
-        file = await tg_connect.get_direct_download_properties(db_id)
-        file_size = file.file_size
-        mime_type = file.mime_type
-    except ValueError as e:
-        raise web.HTTPBadRequest(text=str(e))
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers={'Range': f'bytes={range_start}-'}) as response:
+                if response.status == 200 or response.status == 206:  # 200 OK or 206 Partial Content
+                    # Get content length and mime type from response headers
+                    content_length = response.headers.get('Content-Length')
+                    content_type = response.headers.get('Content-Type')
 
-    from_bytes, until_bytes = parse_range_header(range_header, file_size)
-    if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-        return web.Response(
-            status=416,
-            body="416: Range not satisfiable",
-            headers={"Content-Range": f"bytes */{file_size}"},
-        )
+                    # Prepare the response to stream the file to the client
+                    headers = {
+                        'Content-Type': content_type,
+                        'Content-Length': content_length,
+                    }
 
-    chunk_size = 1024 * 1024
-    until_bytes = min(until_bytes, file_size - 1)
-    offset = from_bytes - (from_bytes % chunk_size)
-    first_part_cut = from_bytes - offset
-    last_part_cut = until_bytes % chunk_size + 1
-    req_length = until_bytes - from_bytes + 1
-    part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
+                    if range_header:
+                        headers['Content-Range'] = f'bytes {range_start}-{int(range_start) + int(content_length) - 1}/{content_length}'
 
-    body = tg_connect.yield_direct_download(file, offset, first_part_cut, last_part_cut, part_count, chunk_size)
-
-    disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
-    return web.Response(
-        status=206 if range_header else 200,
-        body=body,
-        headers={
-            "Content-Type": mime_type,
-            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-            "Content-Length": str(req_length),
-            "Content-Disposition": f'{disposition}; filename="{db_id.split("/")[-1]}"',  # Use appropriate filename
-            "Accept-Ranges": "bytes",
-        },
-    )
-
-# Route for downloading files from direct URLs
-@routes.get("/url/{url}", allow_head=True)
-async def url_download_handler(request: web.Request):
-    """Handler for downloading files from direct URLs."""
-    try:
-        url = request.match_info["url"]
-        return await direct_url_streamer(request, url)
+                    return web.Response(body=response.content, headers=headers, status=response.status)
+                else:
+                    logging.error(f"Failed to fetch file: HTTP Status {response.status}")
+                    return web.Response(status=response.status)
     except Exception as e:
-        logging.critical(e)
-        logging.debug(traceback.format_exc())
-        raise web.HTTPInternalServerError(text=str(e))
-
+        logging.error(f"An error occurred: {e}")
+        return web.Response(status=500, text='Internal Server Error')
 
