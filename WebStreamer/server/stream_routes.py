@@ -164,7 +164,7 @@ url_cache = {}
 
 # URL Download
 
-@routes.get("/dl/{url}", allow_head=True)
+@routes.get("/direct/{url}", allow_head=True)
 async def download_handler(request: web.Request):
     """Handler for proxying file downloads from direct URLs."""
     url = request.match_info["url"]
