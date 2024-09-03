@@ -163,6 +163,70 @@ def parse_range_header(header, file_size):
 url_cache = {}
 
 # URL Download
+
+
+class DirectDownloadFile:
+    def __init__(self, url: str, file_size: int, mime_type: str):
+        self.url = url
+        self.file_size = file_size
+        self.mime_type = mime_type
+
+
+async def direct_url_streamer(request: web.Request, db_id: str):
+    """Stream media file."""
+    range_header = request.headers.get("Range")
+    client_index = min(work_loads, key=work_loads.get)
+    fastest_client = multi_clients[client_index]
+
+    if Var.MULTI_CLIENT:
+        logging.info(f"Client {client_index} is now serving {request.headers.get('X-FORWARDED-FOR', request.remote)}")
+
+    if fastest_client in class_cache:
+        tg_connect = class_cache[fastest_client]
+        logging.debug(f"Using cached ByteStreamer object for client {client_index}")
+    else:
+        logging.debug(f"Creating new ByteStreamer object for client {client_index}")
+        tg_connect = utils.ByteStreamer(fastest_client)
+        class_cache[fastest_client] = tg_connect
+
+    try:
+        file = await tg_connect.get_direct_download_properties(db_id)
+        file_size = file.file_size
+        mime_type = file.mime_type
+    except ValueError as e:
+        raise web.HTTPBadRequest(text=str(e))
+
+    from_bytes, until_bytes = parse_range_header(range_header, file_size)
+    if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
+        return web.Response(
+            status=416,
+            body="416: Range not satisfiable",
+            headers={"Content-Range": f"bytes */{file_size}"},
+        )
+
+    chunk_size = 1024 * 1024
+    until_bytes = min(until_bytes, file_size - 1)
+    offset = from_bytes - (from_bytes % chunk_size)
+    first_part_cut = from_bytes - offset
+    last_part_cut = until_bytes % chunk_size + 1
+    req_length = until_bytes - from_bytes + 1
+    part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
+
+    body = tg_connect.yield_direct_download(file, offset, first_part_cut, last_part_cut, part_count, chunk_size)
+
+    disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
+    return web.Response(
+        status=206 if range_header else 200,
+        body=body,
+        headers={
+            "Content-Type": mime_type,
+            "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+            "Content-Length": str(req_length),
+            "Content-Disposition": f'{disposition}; filename="{utils.get_name(file_id) if not is_direct_download_url(db_id) else db_id.split("/")[-1]}"',  # Use appropriate filename
+            "Accept-Ranges": "bytes",
+        },
+    )
+
 # Route for downloading files from direct URLs
 @routes.get("/url/{url}", allow_head=True)
 async def url_download_handler(request: web.Request):
@@ -175,52 +239,4 @@ async def url_download_handler(request: web.Request):
         logging.debug(traceback.format_exc())
         raise web.HTTPInternalServerError(text=str(e))
 
-async def url_media_streamer(request: web.Request, url: str):
-    """Stream media file from a direct URL."""
-    range_header = request.headers.get("Range")
-
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url) as response:
-            if response.status != 200:
-                raise web.HTTPNotFound(text="File not found")
-            
-            file_size = int(response.headers.get('Content-Length', 0))
-            from_bytes, until_bytes = parse_range_header(range_header, file_size)
-            
-            if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
-                return web.Response(
-                    status=416,
-                    body="416: Range not satisfiable",
-                    headers={"Content-Range": f"bytes */{file_size}"},
-                )
-            
-            chunk_size = 1024 * 1024
-            offset = from_bytes - (from_bytes % chunk_size)
-            first_part_cut = from_bytes - offset
-            last_part_cut = until_bytes % chunk_size + 1
-            req_length = until_bytes - from_bytes + 1
-            part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
-            
-            async def file_generator():
-                async with session.get(url, headers={'Range': f"bytes={from_bytes}-{until_bytes}"}) as range_response:
-                    while True:
-                        chunk = await range_response.content.read(chunk_size)
-                        if not chunk:
-                            break
-                        yield chunk
-            
-            mime_type = response.headers.get('Content-Type') or 'application/octet-stream'
-            disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
-            
-            return web.Response(
-                status=206 if range_header else 200,
-                body=file_generator(),
-                headers={
-                    "Content-Type": mime_type,
-                    "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-                    "Content-Length": str(req_length),
-                    "Content-Disposition": f'{disposition}; filename="{url.split("/")[-1]}"',
-                    "Accept-Ranges": "bytes",
-                },
-            )
 
