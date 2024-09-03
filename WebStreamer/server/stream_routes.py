@@ -167,10 +167,10 @@ url_cache = {}
 # Set chunk size for downloading (adjust as needed)
 CHUNK_SIZE = 1024 * 1024  # 1 MB
 
-@routes.get("/url/{path}", allow_head=True)
+@routes.get("/download_url", allow_head=True)
 async def url_download_handler(request: web.Request):
     """Handler for downloading files from direct URLs with resumability."""
-    url = request.match_info.get("path")
+    url = request.query.get('url')
     if not url:
         return web.Response(status=400, text="Missing 'url' parameter")
 
