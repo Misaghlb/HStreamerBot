@@ -167,11 +167,11 @@ class InvalidHash(Exception):
 class FileNotFound(Exception):
     pass
 
-@routes.get("/dl2/{url:path}", allow_head=True)
+@routes.get("/downl/{path}", allow_head=True)
 async def download_handler2(request: web.Request):
     """Handler for download endpoint."""
     try:
-        url = request.match_info["url"]
+        url = request.match_info["path"]
         return await media_streamer2(request, url)
     except InvalidHash as e:
         raise web.HTTPForbidden(text=e.message)
