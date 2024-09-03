@@ -16,6 +16,9 @@ from WebStreamer import utils, StartTime, __version__
 from WebStreamer.utils.render_template import render_page
 import aiohttp
 from urllib.parse import unquote
+import asyncio
+import os
+from cachetools import TTLCache
 
 routes = web.RouteTableDef()
 
@@ -166,11 +169,14 @@ def parse_range_header(header, file_size):
 # Increase chunk size for faster downloads
 CHUNK_SIZE = 1024 * 1024  # 1MB
 
-# Create a connection pool
-conn_pool = aiohttp.TCPConnector(limit=100)  # Adjust the limit as needed
-
 # Create a cache for file metadata
 metadata_cache = TTLCache(maxsize=1000, ttl=3600)  # Cache for 1 hour
+
+# Create a function to get or create the connection pool
+async def get_connector():
+    if not hasattr(get_connector, 'connector'):
+        get_connector.connector = aiohttp.TCPConnector(limit=100)  # Adjust the limit as needed
+    return get_connector.connector
 
 @routes.get("/dllink", allow_head=True)
 async def download_handler2(request: web.Request):
@@ -180,7 +186,7 @@ async def download_handler2(request: web.Request):
         if not url:
             raise web.HTTPBadRequest(text="Missing 'url' query parameter")
         url = unquote(url)  # Decode the URL
-        return await media_streamer2(request, url)
+        return await media_streamer(request, url)
     except aiohttp.ClientError as e:
         raise web.HTTPBadGateway(text=str(e))
     except Exception as e:
@@ -207,7 +213,8 @@ async def media_streamer2(request: web.Request, url: str):
     """Stream media file from URL."""
     range_header = request.headers.get("Range")
     
-    async with aiohttp.ClientSession(connector=conn_pool) as session:
+    connector = await get_connector()
+    async with aiohttp.ClientSession(connector=connector) as session:
         metadata = await get_file_metadata(session, url)
         file_size = metadata["file_size"]
         mime_type = metadata["mime_type"]
@@ -223,7 +230,8 @@ async def media_streamer2(request: web.Request, url: str):
     req_length = until_bytes - from_bytes + 1
 
     async def body():
-        async with aiohttp.ClientSession(connector=conn_pool) as session:
+        connector = await get_connector()
+        async with aiohttp.ClientSession(connector=connector) as session:
             headers = {"Range": f"bytes={from_bytes}-{until_bytes}"}
             async with session.get(url, headers=headers) as response:
                 while True:
@@ -246,7 +254,6 @@ async def media_streamer2(request: web.Request, url: str):
             "Accept-Ranges": "bytes",
         },
     )
-
 
 
 def parse_range_header(header, file_size):
