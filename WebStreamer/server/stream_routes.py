@@ -163,74 +163,23 @@ def parse_range_header(header, file_size):
 url_cache = {}
 
 # URL Download
-import aiohttp
-import asyncio
-import logging
-import mimetypes
-import math
-from aiohttp import web
+async def direct_download_streamer(request: web.Request, url: str):
+    """Stream a file from a direct URL."""
 
-class URLStreamer:
-    def __init__(self):
-        """Initialize the URL streamer with caching capabilities."""
-        self.url_cache = {}
-        self.clean_timer = 30 * 60
-        asyncio.get_event_loop().create_task(self.clean_cache())
+    # Basic URL validation (replace with more robust validation if needed)
+    if not url.startswith(("http://", "https://")):
+        raise HTTPForbidden(text="Invalid URL")
 
-    async def clean_cache(self) -> None:
-        """Periodically clean the cache to reduce memory usage."""
-        while True:
-            await asyncio.sleep(self.clean_timer)
-            self.url_cache.clear()
-            logging.debug("Cleaned the URL cache")
+    async with aiohttp.ClientSession() as session:
+        async with session.head(url) as head_response:
+            if head_response.status != 200:
+                raise HTTPNotFound(text=f"Could not access URL: {url}")
 
-    async def get_file_properties_from_url(self, url):
-        """Get file properties like size and MIME type from the URL."""
-        if url in self.url_cache:
-            return self.url_cache[url]
+            file_size = int(head_response.headers.get("Content-Length", 0))
+            mime_type = head_response.headers.get("Content-Type")
+            supports_range = "bytes" in head_response.headers.get("Accept-Ranges", "")
 
-        async with aiohttp.ClientSession() as session:
-            async with session.head(url) as resp:
-                if resp.status != 200:
-                    raise web.HTTPBadRequest(text="Could not retrieve file properties.")
-                file_size = int(resp.headers.get('Content-Length', 0))
-                mime_type = resp.headers.get('Content-Type', None) or mimetypes.guess_type(url)[0] or "application/octet-stream"
-                filename = url.split('/')[-1]
-                file_info = {"file_size": file_size, "mime_type": mime_type, "filename": filename}
-                self.url_cache[url] = file_info
-                return file_info
-
-    async def yield_file_from_url(self, url, offset, first_part_cut, last_part_cut, part_count, chunk_size):
-        """Yield file chunks from the URL."""
-        async with aiohttp.ClientSession() as session:
-            current_part = 1
-
-            while current_part <= part_count:
-                start = offset + (current_part - 1) * chunk_size
-                end = min(start + chunk_size - 1, offset + (part_count * chunk_size) - 1)
-                headers = {"Range": f"bytes={start}-{end}"}
-                
-                async with session.get(url, headers=headers) as resp:
-                    chunk = await resp.content.read(chunk_size)
-
-                    if current_part == 1:
-                        yield chunk[first_part_cut:]
-                    elif current_part == part_count:
-                        yield chunk[:last_part_cut]
-                    else:
-                        yield chunk
-
-                    current_part += 1
-
-    async def stream_file(self, request: web.Request, url: str):
-        """Stream media file from any direct URL."""
         range_header = request.headers.get("Range")
-        file_info = await self.get_file_properties_from_url(url)
-        
-        file_size = file_info['file_size']
-        mime_type = file_info['mime_type']
-        filename = file_info['filename']
-        
         from_bytes, until_bytes = parse_range_header(range_header, file_size)
 
         if (until_bytes >= file_size) or (from_bytes < 0) or (until_bytes < from_bytes):
@@ -239,48 +188,44 @@ class URLStreamer:
                 body="416: Range not satisfiable",
                 headers={"Content-Range": f"bytes */{file_size}"},
             )
-        
-        chunk_size = 1024 * 1024
-        until_bytes = min(until_bytes, file_size - 1)
-        offset = from_bytes - (from_bytes % chunk_size)
-        first_part_cut = from_bytes - offset
-        last_part_cut = until_bytes % chunk_size + 1
-        req_length = until_bytes - from_bytes + 1
-        part_count = math.ceil((until_bytes + 1) / chunk_size) - math.floor(offset / chunk_size)
 
-        response = web.StreamResponse(
-            status=206 if range_header else 200,
-            headers={
-                "Content-Type": mime_type,
-                "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
-                "Content-Length": str(req_length),
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "Accept-Ranges": "bytes",
-            },
-        )
+        headers = {}
+        if range_header and supports_range:
+            headers["Range"] = range_header
 
-        await response.prepare(request)
+        async with session.get(url, headers=headers) as response:
+            if response.status != 200 and response.status != 206:
+                raise HTTPNotFound(text=f"Could not download file: {url}")
 
-        async for chunk in self.yield_file_from_url(url, offset, first_part_cut, last_part_cut, part_count, chunk_size):
-            await response.write(chunk)
-        
-        await response.write_eof()
+            chunk_size = 1024 * 1024
+            req_length = until_bytes - from_bytes + 1
+            disposition = "attachment" if "application/" in mime_type or "text/" in mime_type else "inline"
+            filename = url.split("/")[-1]  # Extract filename from URL (improve if needed)
 
-        return response
+            return web.Response(
+                status=206 if range_header else 200,
+                body=response.content.iter_chunked(chunk_size),  # Stream the response content
+                headers={
+                    "Content-Type": mime_type,
+                    "Content-Range": f"bytes {from_bytes}-{until_bytes}/{file_size}",
+                    "Content-Length": str(req_length),
+                    "Content-Disposition": f'{disposition}; filename="{filename}"',
+                    "Accept-Ranges": "bytes" if supports_range else "none",
+                },
+            )
 
-url_streamer_instance = URLStreamer()
-
-@routes.get("/download_url", allow_head=True)
-async def download_url_handler(request: web.Request):
-    """Handler for the download URL endpoint."""
-    url = request.query.get('url')
-    if not url:
-        raise web.HTTPBadRequest(text="Missing 'url' parameter.")
-    
+@routes.get("/dl_direct/{url}", allow_head=True)
+async def direct_download_handler(request: web.Request):
+    """Handler for direct link download endpoint."""
     try:
-        return await url_streamer_instance.stream_file(request, url)
+        url = request.match_info["url"]
+        return await direct_download_streamer(request, url)
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        logging.error(f"Error downloading from {url}: {e}")
+        raise HTTPNotFound(text=f"Error downloading from {url}")
     except Exception as e:
         logging.critical(e)
-        raise web.HTTPInternalServerError(text=str(e))
+        logging.debug(traceback.format_exc())
+        raise HTTPInternalServerError(text=str(e))
 
 
