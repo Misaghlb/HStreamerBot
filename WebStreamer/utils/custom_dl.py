@@ -10,6 +10,23 @@ from hydrogram.session import Session, Auth
 from hydrogram.errors import AuthBytesInvalid
 from hydrogram.file_id import FileId, FileType, ThumbnailSource
 
+import asyncio
+import logging
+import mimetypes
+import math
+from typing import Dict, Union, Tuple
+
+import aiohttp
+from WebStreamer.bot import work_loads
+from hydrogram import Client, utils
+from hydrogram.errors import AuthBytesInvalid
+
+
+class DirectDownloadFile:
+    def __init__(self, url: str, file_size: int, mime_type: str):
+        self.url = url
+        self.file_size = file_size
+        self.mime_type = mime_type
 
 class ByteStreamer:
     def __init__(self, client: Client):
